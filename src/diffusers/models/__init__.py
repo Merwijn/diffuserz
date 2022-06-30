@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dualencoder_gfn import DualEncoderEpsNetwork
 from .unet import UNetModel
 from .unet_glide import GlideSuperResUNetModel, GlideTextToImageUNetModel, GlideUNetModel
 from .unet_grad_tts import UNetGradTTSModel

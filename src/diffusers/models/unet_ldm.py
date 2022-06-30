@@ -1,5 +1,4 @@
 import math
-from abc import abstractmethod
 from inspect import isfunction
 
 import numpy as np
@@ -9,9 +8,12 @@ import torch.nn.functional as F
 
 from ..configuration_utils import ConfigMixin
 from ..modeling_utils import ModelMixin
-from .attention2d import AttentionBlock
+from .attention import AttentionBlock
 from .embeddings import get_timestep_embedding
-from .resnet import Downsample, Upsample
+from .resnet import Downsample, ResnetBlock, TimestepBlock, Upsample
+
+
+# from .resnet import ResBlock
 
 
 def exists(val):
@@ -328,7 +330,6 @@ def normalization(channels, swish=0.0):
     return GroupNorm32(num_channels=channels, num_groups=32, swish=swish)
 
 
-## go
 class AttentionPool2d(nn.Module):
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
@@ -359,18 +360,6 @@ class AttentionPool2d(nn.Module):
         return x[:, :, 0]
 
 
-class TimestepBlock(nn.Module):
-    """
-    Any module where forward() takes timestep embeddings as a second argument.
-    """
-
-    @abstractmethod
-    def forward(self, x, emb):
-        """
-        Apply the module to `x` given `emb` timestep embeddings.
-        """
-
-
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     """
     A sequential module that passes timestep embeddings to the children that support it as an extra input.
@@ -378,108 +367,13 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
 
     def forward(self, x, emb, context=None):
         for layer in self:
-            if isinstance(layer, TimestepBlock):
+            if isinstance(layer, TimestepBlock) or isinstance(layer, ResnetBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, context)
             else:
                 x = layer(x)
         return x
-
-
-class ResBlock(TimestepBlock):
-    """
-    A residual block that can optionally change the number of channels. :param channels: the number of input channels.
-    :param emb_channels: the number of timestep embedding channels. :param dropout: the rate of dropout. :param
-    out_channels: if specified, the number of out channels. :param use_conv: if True and out_channels is specified, use
-    a spatial
-        convolution instead of a smaller 1x1 convolution to change the channels in the skip connection.
-    :param dims: determines if the signal is 1D, 2D, or 3D. :param use_checkpoint: if True, use gradient checkpointing
-    on this module. :param up: if True, use this block for upsampling. :param down: if True, use this block for
-    downsampling.
-    """
-
-    def __init__(
-        self,
-        channels,
-        emb_channels,
-        dropout,
-        out_channels=None,
-        use_conv=False,
-        use_scale_shift_norm=False,
-        dims=2,
-        use_checkpoint=False,
-        up=False,
-        down=False,
-    ):
-        super().__init__()
-        self.channels = channels
-        self.emb_channels = emb_channels
-        self.dropout = dropout
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.use_checkpoint = use_checkpoint
-        self.use_scale_shift_norm = use_scale_shift_norm
-
-        self.in_layers = nn.Sequential(
-            normalization(channels),
-            nn.SiLU(),
-            conv_nd(dims, channels, self.out_channels, 3, padding=1),
-        )
-
-        self.updown = up or down
-
-        if up:
-            self.h_upd = Upsample(channels, use_conv=False, dims=dims)
-            self.x_upd = Upsample(channels, use_conv=False, dims=dims)
-        elif down:
-            self.h_upd = Downsample(channels, use_conv=False, dims=dims, padding=1, name="op")
-            self.x_upd = Downsample(channels, use_conv=False, dims=dims, padding=1, name="op")
-        else:
-            self.h_upd = self.x_upd = nn.Identity()
-
-        self.emb_layers = nn.Sequential(
-            nn.SiLU(),
-            linear(
-                emb_channels,
-                2 * self.out_channels if use_scale_shift_norm else self.out_channels,
-            ),
-        )
-        self.out_layers = nn.Sequential(
-            normalization(self.out_channels),
-            nn.SiLU(),
-            nn.Dropout(p=dropout),
-            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)),
-        )
-
-        if self.out_channels == channels:
-            self.skip_connection = nn.Identity()
-        elif use_conv:
-            self.skip_connection = conv_nd(dims, channels, self.out_channels, 3, padding=1)
-        else:
-            self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
-
-    def forward(self, x, emb):
-        if self.updown:
-            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
-            h = in_rest(x)
-            h = self.h_upd(h)
-            x = self.x_upd(x)
-            h = in_conv(h)
-        else:
-            h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
-        if self.use_scale_shift_norm:
-            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale, shift = torch.chunk(emb_out, 2, dim=1)
-            h = out_norm(h) * (1 + scale) + shift
-            h = out_rest(h)
-        else:
-            h = h + emb_out
-            h = self.out_layers(h)
-        return self.skip_connection(x) + h
 
 
 class QKVAttention(nn.Module):
@@ -668,14 +562,14 @@ class UNetLDMModel(ModelMixin, ConfigMixin):
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
+                    ResnetBlock(
+                        in_channels=ch,
                         out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
+                        dropout=dropout,
+                        temb_channels=time_embed_dim,
+                        eps=1e-5,
+                        non_linearity="silu",
+                        overwrite_for_ldm=True,
                     )
                 ]
                 ch = mult * model_channels
@@ -708,16 +602,17 @@ class UNetLDMModel(ModelMixin, ConfigMixin):
                 out_ch = ch
                 self.input_blocks.append(
                     TimestepEmbedSequential(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                        )
+                        #                        ResBlock(
+                        #                            ch,
+                        #                            time_embed_dim,
+                        #                            dropout,
+                        #                            out_channels=out_ch,
+                        #                            dims=dims,
+                        #                            use_checkpoint=use_checkpoint,
+                        #                            use_scale_shift_norm=use_scale_shift_norm,
+                        #                            down=True,
+                        #                        )
+                        None
                         if resblock_updown
                         else Downsample(
                             ch, use_conv=conv_resample, dims=dims, out_channels=out_ch, padding=1, name="op"
@@ -738,13 +633,14 @@ class UNetLDMModel(ModelMixin, ConfigMixin):
             # num_heads = 1
             dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
         self.middle_block = TimestepEmbedSequential(
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
+            ResnetBlock(
+                in_channels=ch,
+                out_channels=None,
+                dropout=dropout,
+                temb_channels=time_embed_dim,
+                eps=1e-5,
+                non_linearity="silu",
+                overwrite_for_ldm=True,
             ),
             AttentionBlock(
                 ch,
@@ -755,13 +651,14 @@ class UNetLDMModel(ModelMixin, ConfigMixin):
             )
             if not use_spatial_transformer
             else SpatialTransformer(ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim),
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
+            ResnetBlock(
+                in_channels=ch,
+                out_channels=None,
+                dropout=dropout,
+                temb_channels=time_embed_dim,
+                eps=1e-5,
+                non_linearity="silu",
+                overwrite_for_ldm=True,
             ),
         )
         self._feature_size += ch
@@ -771,15 +668,15 @@ class UNetLDMModel(ModelMixin, ConfigMixin):
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
                 layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
+                    ResnetBlock(
+                        in_channels=ch + ich,
                         out_channels=model_channels * mult,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
+                        dropout=dropout,
+                        temb_channels=time_embed_dim,
+                        eps=1e-5,
+                        non_linearity="silu",
+                        overwrite_for_ldm=True,
+                    ),
                 ]
                 ch = model_channels * mult
                 if ds in attention_resolutions:
@@ -807,16 +704,17 @@ class UNetLDMModel(ModelMixin, ConfigMixin):
                 if level and i == num_res_blocks:
                     out_ch = ch
                     layers.append(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
-                        )
+                        #                        ResBlock(
+                        #                            ch,
+                        #                            time_embed_dim,
+                        #                            dropout,
+                        #                            out_channels=out_ch,
+                        #                            dims=dims,
+                        #                            use_checkpoint=use_checkpoint,
+                        #                            use_scale_shift_norm=use_scale_shift_norm,
+                        #                            up=True,
+                        #                        )
+                        None
                         if resblock_updown
                         else Upsample(ch, use_conv=conv_resample, dims=dims, out_channels=out_ch)
                     )
@@ -951,15 +849,15 @@ class EncoderUNetModel(nn.Module):
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
+                    ResnetBlock(
+                        in_channels=ch,
+                        out_channels=model_channels * mult,
+                        dropout=dropout,
+                        temb_channels=time_embed_dim,
+                        eps=1e-5,
+                        non_linearity="silu",
+                        overwrite_for_ldm=True,
+                    ),
                 ]
                 ch = mult * model_channels
                 if ds in attention_resolutions:
@@ -979,16 +877,17 @@ class EncoderUNetModel(nn.Module):
                 out_ch = ch
                 self.input_blocks.append(
                     TimestepEmbedSequential(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                        )
+                        #                        ResBlock(
+                        #                            ch,
+                        #                            time_embed_dim,
+                        #                            dropout,
+                        #                            out_channels=out_ch,
+                        #                            dims=dims,
+                        #                            use_checkpoint=use_checkpoint,
+                        #                            use_scale_shift_norm=use_scale_shift_norm,
+                        #                            down=True,
+                        #                        )
+                        None
                         if resblock_updown
                         else Downsample(
                             ch, use_conv=conv_resample, dims=dims, out_channels=out_ch, padding=1, name="op"
@@ -1001,13 +900,14 @@ class EncoderUNetModel(nn.Module):
                 self._feature_size += ch
 
         self.middle_block = TimestepEmbedSequential(
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
+            ResnetBlock(
+                in_channels=ch,
+                out_channels=None,
+                dropout=dropout,
+                temb_channels=time_embed_dim,
+                eps=1e-5,
+                non_linearity="silu",
+                overwrite_for_ldm=True,
             ),
             AttentionBlock(
                 ch,
@@ -1016,13 +916,14 @@ class EncoderUNetModel(nn.Module):
                 num_head_channels=num_head_channels,
                 use_new_attention_order=use_new_attention_order,
             ),
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
+            ResnetBlock(
+                in_channels=ch,
+                out_channels=None,
+                dropout=dropout,
+                temb_channels=time_embed_dim,
+                eps=1e-5,
+                non_linearity="silu",
+                overwrite_for_ldm=True,
             ),
         )
         self._feature_size += ch

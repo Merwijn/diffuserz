@@ -6,6 +6,7 @@ import torch.nn as nn
 from ..configuration_utils import ConfigMixin
 from ..modeling_utils import ModelMixin
 from .embeddings import get_timestep_embedding
+from .resnet import Downsample, ResidualTemporalBlock, Upsample
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -15,24 +16,6 @@ class SinusoidalPosEmb(nn.Module):
 
     def forward(self, x):
         return get_timestep_embedding(x, self.dim)
-
-
-class Downsample1d(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.conv = nn.Conv1d(dim, dim, 3, 2, 1)
-
-    def forward(self, x):
-        return self.conv(x)
-
-
-class Upsample1d(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.conv = nn.ConvTranspose1d(dim, dim, 4, 2, 1)
-
-    def forward(self, x):
-        return self.conv(x)
 
 
 class RearrangeDim(nn.Module):
@@ -70,38 +53,6 @@ class Conv1dBlock(nn.Module):
 
     def forward(self, x):
         return self.block(x)
-
-
-class ResidualTemporalBlock(nn.Module):
-    def __init__(self, inp_channels, out_channels, embed_dim, horizon, kernel_size=5):
-        super().__init__()
-
-        self.blocks = nn.ModuleList(
-            [
-                Conv1dBlock(inp_channels, out_channels, kernel_size),
-                Conv1dBlock(out_channels, out_channels, kernel_size),
-            ]
-        )
-
-        self.time_mlp = nn.Sequential(
-            nn.Mish(),
-            nn.Linear(embed_dim, out_channels),
-            RearrangeDim(),
-            #            Rearrange("batch t -> batch t 1"),
-        )
-
-        self.residual_conv = (
-            nn.Conv1d(inp_channels, out_channels, 1) if inp_channels != out_channels else nn.Identity()
-        )
-
-    def forward(self, x, t):
-        """
-        x : [ batch_size x inp_channels x horizon ] t : [ batch_size x embed_dim ] returns: out : [ batch_size x
-        out_channels x horizon ]
-        """
-        out = self.blocks[0](x) + self.time_mlp(t)
-        out = self.blocks[1](out)
-        return out + self.residual_conv(x)
 
 
 class TemporalUNet(ModelMixin, ConfigMixin):  # (nn.Module):
@@ -145,7 +96,7 @@ class TemporalUNet(ModelMixin, ConfigMixin):  # (nn.Module):
                     [
                         ResidualTemporalBlock(dim_in, dim_out, embed_dim=time_dim, horizon=training_horizon),
                         ResidualTemporalBlock(dim_out, dim_out, embed_dim=time_dim, horizon=training_horizon),
-                        Downsample1d(dim_out) if not is_last else nn.Identity(),
+                        Downsample(dim_out, use_conv=True, dims=1) if not is_last else nn.Identity(),
                     ]
                 )
             )
@@ -165,7 +116,7 @@ class TemporalUNet(ModelMixin, ConfigMixin):  # (nn.Module):
                     [
                         ResidualTemporalBlock(dim_out * 2, dim_in, embed_dim=time_dim, horizon=training_horizon),
                         ResidualTemporalBlock(dim_in, dim_in, embed_dim=time_dim, horizon=training_horizon),
-                        Upsample1d(dim_in) if not is_last else nn.Identity(),
+                        Upsample(dim_in, use_conv_transpose=True, dims=1) if not is_last else nn.Identity(),
                     ]
                 )
             )

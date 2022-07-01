@@ -259,7 +259,7 @@ class UnetModelTests(ModelTesterMixin, unittest.TestCase):
         # fmt: off
         expected_output_slice = torch.tensor([0.2891, -0.1899, 0.2595, -0.6214, 0.0968, -0.2622, 0.4688, 0.1311, 0.0053])
         # fmt: on
-        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-3))
+        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-2))
 
 
 class GlideSuperResUNetTests(ModelTesterMixin, unittest.TestCase):
@@ -795,7 +795,7 @@ class NCSNppModelTests(ModelTesterMixin, unittest.TestCase):
         sizes = (32, 32)
 
         noise = torch.randn((batch_size, num_channels) + sizes).to(torch_device)
-        time_step = torch.tensor(batch_size * [9.]).to(torch_device)
+        time_step = torch.tensor(batch_size * [9.0]).to(torch_device)
 
         with torch.no_grad():
             output = model(noise, time_step)
@@ -880,7 +880,7 @@ class VQModelTests(ModelTesterMixin, unittest.TestCase):
         # fmt: off
         expected_output_slice = torch.tensor([-1.1321, 0.1056, 0.3505, -0.6461, -0.2014, 0.0419, -0.5763, -0.8462, -0.4218])
         # fmt: on
-        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-3))
+        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-2))
 
 
 class AutoEncoderKLTests(ModelTesterMixin, unittest.TestCase):
@@ -951,7 +951,7 @@ class AutoEncoderKLTests(ModelTesterMixin, unittest.TestCase):
         # fmt: off
         expected_output_slice = torch.tensor([-0.0814, -0.0229, -0.1320, -0.4123, -0.0366, -0.3473, 0.0438, -0.1662, 0.1750])
         # fmt: on
-        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-3))
+        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-2))
 
 
 class PipelineTesterMixin(unittest.TestCase):
@@ -1159,7 +1159,9 @@ class PipelineTesterMixin(unittest.TestCase):
         image_slice = image[0, -1, -3:, -3:].cpu()
 
         assert image.shape == (1, 3, 256, 256)
-        expected_slice = torch.tensor([0.5025, 0.4121, 0.3851, 0.4806, 0.3996, 0.3745, 0.4839, 0.4559, 0.4293])
+        expected_slice = torch.tensor(
+            [-0.1202, -0.1005, -0.0635, -0.0520, -0.1282, -0.0838, -0.0981, -0.1318, -0.1106]
+        )
         assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
 
     def test_module_from_pipeline(self):

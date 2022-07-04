@@ -10,7 +10,7 @@ class ScoreSdeVePipeline(DiffusionPipeline):
         super().__init__()
         self.register_modules(model=model, scheduler=scheduler)
 
-    def __call__(self, num_inference_steps=2000, generator=None):
+    def __call_old__(self, num_inference_steps=2000, generator=None):
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         img_size = self.model.config.image_size
@@ -40,5 +40,34 @@ class ScoreSdeVePipeline(DiffusionPipeline):
                 result = model(x, sigma_t)
 
             x, x_mean = self.scheduler.step_pred(result, x, t)
+
+        return x_mean
+
+
+    def __call__(self, num_inference_steps=2000, generator=None):
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+        img_size = self.model.config.image_size
+        channels = self.model.config.num_channels
+        shape = (1, channels, img_size, img_size)
+
+        model = self.model.to(device)
+        self.scheduler.set_timesteps(num_inference_steps)
+
+        sample = torch.randn(*shape) * self.scheduler.timesteps[0]
+        sample = sample.to(device)
+
+        for i in range(num_inference_steps):
+            d_i =
+
+            for _ in range(n_steps):
+                with torch.no_grad():
+                    result = self.model(sample, sigma_t)
+                sample = self.scheduler.step_correct(result, sample)
+
+            with torch.no_grad():
+                result = model(sample, sigma_t)
+
+            sample, x_mean = self.scheduler.step_pred(result, sample, t)
 
         return x_mean

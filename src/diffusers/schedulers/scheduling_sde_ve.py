@@ -24,6 +24,26 @@ from .scheduling_utils import SchedulerMixin
 
 
 class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
+    def __init__(self, sigma_min=0.02, sigma_max=100, tensor_format="np"):
+        super().__init__()
+        self.register_to_config(
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+        )
+
+        self.timesteps = None
+
+    def set_timesteps(self, num_inference_steps):
+        self.timesteps = [
+            self.config.sigma_max * (self.config.sigma_min / self.config.sigma_max) ** (i / num_inference_steps - 1)
+            for i in range(num_inference_steps)
+        ]
+
+    def step(self, result, x, t):
+        pass
+
+
+class OldScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
     def __init__(self, snr=0.15, sigma_min=0.01, sigma_max=1348, sampling_eps=1e-5, tensor_format="np"):
         super().__init__()
         self.register_to_config(

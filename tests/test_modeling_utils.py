@@ -1136,11 +1136,15 @@ class PipelineTesterMixin(unittest.TestCase):
     def test_score_sde_ve_pipeline(self):
         model = NCSNpp.from_pretrained("fusing/ffhq_ncsnpp")
         scheduler = ScoreSdeVeScheduler.from_config("fusing/ffhq_ncsnpp")
+        scheduler.sigma_min = 0.02
+        scheduler.sigma_max = 100
+        scheduler.config.sigma_min = 0.02
+        scheduler.config.sigma_max = 100
 
         sde_ve = ScoreSdeVePipeline(model=model, scheduler=scheduler)
 
-        torch.manual_seed(0)
-        image = sde_ve(num_inference_steps=2)
+        generator = torch.manual_seed(3)
+        image = sde_ve.determ_call(num_inference_steps=2000, generator=generator)
 
         expected_image_sum = 3382849024.0
         expected_image_mean = 1075.3788

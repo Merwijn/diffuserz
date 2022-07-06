@@ -330,7 +330,7 @@ class NCSNpp(ModelMixin, ConfigMixin):
         if self.embedding_type == "fourier":
             # Gaussian Fourier features embeddings.
             used_sigmas = timesteps
-            temb = modules[m_idx](torch.log(used_sigmas))
+            temb = modules[m_idx](used_sigmas)
             m_idx += 1
 
         elif self.embedding_type == "positional":
@@ -351,8 +351,8 @@ class NCSNpp(ModelMixin, ConfigMixin):
             temb = None
 
         # If input data is in [0, 1]
-        if not self.config.centered:
-            x = 2 * x - 1.0
+        # if not self.config.centered:
+        #     x = 2 * x - 1.0
 
         # Downsampling block
         input_pyramid = None
@@ -463,8 +463,8 @@ class NCSNpp(ModelMixin, ConfigMixin):
             m_idx += 1
 
         assert m_idx == len(modules)
-        if self.config.scale_by_sigma:
-            used_sigmas = used_sigmas.reshape((x.shape[0], *([1] * len(x.shape[1:]))))
-            h = h / used_sigmas
+        #if self.config.scale_by_sigma:
+        #    used_sigmas = used_sigmas.reshape((x.shape[0], *([1] * len(x.shape[1:]))))
+        #    h = h / used_sigmas
 
         return h

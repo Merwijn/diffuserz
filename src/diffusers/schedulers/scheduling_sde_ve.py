@@ -29,18 +29,41 @@ class ScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):
         self.register_to_config(
             sigma_min=sigma_min,
             sigma_max=sigma_max,
+            tensor_format=tensor_format,
         )
 
         self.timesteps = None
+        self.schedule = None  # sigma(t_i)
+        self.schedule_deriv = None  # sigma'(t_i)
+
+        self.s_churn = 80
+        self.s_min = 0.05
+        self.s_max = 50
 
     def set_timesteps(self, num_inference_steps):
         self.timesteps = [
-            self.config.sigma_max * (self.config.sigma_min / self.config.sigma_max) ** (i / num_inference_steps - 1)
+            (self.config.sigma_max**2)
+            * (((self.config.sigma_min**2) / (self.config.sigma_max**2)) ** (i / (num_inference_steps - 1)))
             for i in range(num_inference_steps)
         ]
+        # t[N] = 0
+        self.timesteps += [0]
+        self.timesteps = np.array(self.timesteps)
 
-    def step(self, result, x, t):
+        self.schedule = np.sqrt(self.timesteps)
+        self.schedule_deriv = 1 / (2 * np.sqrt(self.timesteps))
+
+        # stochastic Karras gammas
+        self.gammas = np.array([min(self.s_churn / (num_inference_steps - 1), 2**0.5 - 1) for t in self.timesteps])
+        #self.gammas[self.timesteps < self.s_min] = 0
+        #self.gammas[self.timesteps > self.s_max] = 0
+        #self.gammas[-50:] = 0
+
+        self.set_format(tensor_format=self.tensor_format)
+
+    def step(self, result, sample, t):
         pass
+
 
 
 class OldScoreSdeVeScheduler(SchedulerMixin, ConfigMixin):

@@ -1,32 +1,11 @@
-import math
-
 import numpy as np
 import torch
 import torch.nn as nn
 
-from ..configuration_utils import ConfigMixin
+from ..configuration_utils import ConfigMixin, register_to_config
 from ..modeling_utils import ModelMixin
 from .attention import AttentionBlock
-from .resnet import Downsample, Upsample
-
-
-def get_timestep_embedding(timesteps, embedding_dim):
-    """
-    This matches the implementation in Denoising Diffusion Probabilistic Models: From Fairseq. Build sinusoidal
-    embeddings. This matches the implementation in tensor2tensor, but differs slightly from the description in Section
-    3.5 of "Attention Is All You Need".
-    """
-    assert len(timesteps.shape) == 1
-
-    half_dim = embedding_dim // 2
-    emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
-    emb = emb.to(device=timesteps.device)
-    emb = timesteps.float()[:, None] * emb[None, :]
-    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-    if embedding_dim % 2 == 1:  # zero pad
-        emb = torch.nn.functional.pad(emb, (0, 1, 0, 0))
-    return emb
+from .resnet import Downsample2D, ResnetBlock2D, Upsample2D
 
 
 def nonlinearity(x):
@@ -36,50 +15,6 @@ def nonlinearity(x):
 
 def Normalize(in_channels):
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
-
-
-class ResnetBlock(nn.Module):
-    def __init__(self, *, in_channels, out_channels=None, conv_shortcut=False, dropout, temb_channels=512):
-        super().__init__()
-        self.in_channels = in_channels
-        out_channels = in_channels if out_channels is None else out_channels
-        self.out_channels = out_channels
-        self.use_conv_shortcut = conv_shortcut
-
-        self.norm1 = Normalize(in_channels)
-        self.conv1 = torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        if temb_channels > 0:
-            self.temb_proj = torch.nn.Linear(temb_channels, out_channels)
-        self.norm2 = Normalize(out_channels)
-        self.dropout = torch.nn.Dropout(dropout)
-        self.conv2 = torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                self.conv_shortcut = torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-            else:
-                self.nin_shortcut = torch.nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x, temb):
-        h = x
-        h = self.norm1(h)
-        h = nonlinearity(h)
-        h = self.conv1(h)
-
-        if temb is not None:
-            h = h + self.temb_proj(nonlinearity(temb))[:, :, None, None]
-
-        h = self.norm2(h)
-        h = nonlinearity(h)
-        h = self.dropout(h)
-        h = self.conv2(h)
-
-        if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                x = self.conv_shortcut(x)
-            else:
-                x = self.nin_shortcut(x)
-
-        return x + h
 
 
 class Encoder(nn.Module):
@@ -119,7 +54,7 @@ class Encoder(nn.Module):
             block_out = ch * ch_mult[i_level]
             for i_block in range(self.num_res_blocks):
                 block.append(
-                    ResnetBlock(
+                    ResnetBlock2D(
                         in_channels=block_in, out_channels=block_out, temb_channels=self.temb_ch, dropout=dropout
                     )
                 )
@@ -130,17 +65,17 @@ class Encoder(nn.Module):
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, use_conv=resamp_with_conv, padding=0)
+                down.downsample = Downsample2D(block_in, use_conv=resamp_with_conv, padding=0)
                 curr_res = curr_res // 2
             self.down.append(down)
 
         # middle
         self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
+        self.mid.block_1 = ResnetBlock2D(
             in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
         )
         self.mid.attn_1 = AttentionBlock(block_in, overwrite_qkv=True)
-        self.mid.block_2 = ResnetBlock(
+        self.mid.block_2 = ResnetBlock2D(
             in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
         )
 
@@ -210,18 +145,18 @@ class Decoder(nn.Module):
         block_in = ch * ch_mult[self.num_resolutions - 1]
         curr_res = resolution // 2 ** (self.num_resolutions - 1)
         self.z_shape = (1, z_channels, curr_res, curr_res)
-        print("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
+        # print("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
 
         # z to block_in
         self.conv_in = torch.nn.Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
 
         # middle
         self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
+        self.mid.block_1 = ResnetBlock2D(
             in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
         )
         self.mid.attn_1 = AttentionBlock(block_in, overwrite_qkv=True)
-        self.mid.block_2 = ResnetBlock(
+        self.mid.block_2 = ResnetBlock2D(
             in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
         )
 
@@ -233,7 +168,7 @@ class Decoder(nn.Module):
             block_out = ch * ch_mult[i_level]
             for i_block in range(self.num_res_blocks + 1):
                 block.append(
-                    ResnetBlock(
+                    ResnetBlock2D(
                         in_channels=block_in, out_channels=block_out, temb_channels=self.temb_ch, dropout=dropout
                     )
                 )
@@ -244,7 +179,7 @@ class Decoder(nn.Module):
             up.block = block
             up.attn = attn
             if i_level != 0:
-                up.upsample = Upsample(block_in, use_conv=resamp_with_conv)
+                up.upsample = Upsample2D(block_in, use_conv=resamp_with_conv)
                 curr_res = curr_res * 2
             self.up.insert(0, up)  # prepend to get consistent order
 
@@ -445,6 +380,7 @@ class DiagonalGaussianDistribution(object):
 
 
 class VQModel(ModelMixin, ConfigMixin):
+    @register_to_config
     def __init__(
         self,
         ch,
@@ -465,26 +401,6 @@ class VQModel(ModelMixin, ConfigMixin):
         give_pre_end=False,
     ):
         super().__init__()
-
-        # register all __init__ params with self.register
-        self.register_to_config(
-            ch=ch,
-            out_ch=out_ch,
-            num_res_blocks=num_res_blocks,
-            attn_resolutions=attn_resolutions,
-            in_channels=in_channels,
-            resolution=resolution,
-            z_channels=z_channels,
-            n_embed=n_embed,
-            embed_dim=embed_dim,
-            remap=remap,
-            sane_index_shape=sane_index_shape,
-            ch_mult=ch_mult,
-            dropout=dropout,
-            double_z=double_z,
-            resamp_with_conv=resamp_with_conv,
-            give_pre_end=give_pre_end,
-        )
 
         # pass init params to Encoder
         self.encoder = Encoder(
@@ -535,13 +451,15 @@ class VQModel(ModelMixin, ConfigMixin):
         dec = self.decoder(quant)
         return dec
 
-    def forward(self, x):
+    def forward(self, sample):
+        x = sample
         h = self.encode(x)
         dec = self.decode(h)
         return dec
 
 
 class AutoencoderKL(ModelMixin, ConfigMixin):
+    @register_to_config
     def __init__(
         self,
         ch,
@@ -561,25 +479,6 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
         give_pre_end=False,
     ):
         super().__init__()
-
-        # register all __init__ params with self.register
-        self.register_to_config(
-            ch=ch,
-            out_ch=out_ch,
-            num_res_blocks=num_res_blocks,
-            attn_resolutions=attn_resolutions,
-            in_channels=in_channels,
-            resolution=resolution,
-            z_channels=z_channels,
-            embed_dim=embed_dim,
-            remap=remap,
-            sane_index_shape=sane_index_shape,
-            ch_mult=ch_mult,
-            dropout=dropout,
-            double_z=double_z,
-            resamp_with_conv=resamp_with_conv,
-            give_pre_end=give_pre_end,
-        )
 
         # pass init params to Encoder
         self.encoder = Encoder(
@@ -626,7 +525,8 @@ class AutoencoderKL(ModelMixin, ConfigMixin):
         dec = self.decoder(z)
         return dec
 
-    def forward(self, x, sample_posterior=False):
+    def forward(self, sample, sample_posterior=False):
+        x = sample
         posterior = self.encode(x)
         if sample_posterior:
             z = posterior.sample()

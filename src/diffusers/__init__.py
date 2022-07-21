@@ -4,40 +4,16 @@
 from .utils import is_inflect_available, is_transformers_available, is_unidecode_available
 
 
-__version__ = "0.0.4"
+__version__ = "0.1.1"
 
 from .modeling_utils import ModelMixin
-from .models import AutoencoderKL, DualEncoderEpsNetwork, NCSNpp, TemporalUNet, UNetLDMModel, UNetModel, VQModel
+from .models import AutoencoderKL, UNet2DConditionModel, UNet2DModel, VQModel, DualEncoderEpsNetwork
 from .pipeline_utils import DiffusionPipeline
-from .pipelines import (
-    BDDMPipeline,
-    DDIMPipeline,
-    DDPMPipeline,
-    LatentDiffusionUncondPipeline,
-    PNDMPipeline,
-    ScoreSdeVePipeline,
-    ScoreSdeVpPipeline,
-)
-from .schedulers import (
-    DDIMScheduler,
-    DDPMScheduler,
-    GradTTSScheduler,
-    PNDMScheduler,
-    SchedulerMixin,
-    ScoreSdeVeScheduler,
-    ScoreSdeVpScheduler,
-)
+from .pipelines import DDIMPipeline, DDPMPipeline, LDMPipeline, PNDMPipeline, ScoreSdeVePipeline
+from .schedulers import DDIMScheduler, DDPMScheduler, PNDMScheduler, SchedulerMixin, ScoreSdeVeScheduler
 
 
 if is_transformers_available():
-    from .models.unet_glide import GlideSuperResUNetModel, GlideTextToImageUNetModel, GlideUNetModel
-    from .models.unet_grad_tts import UNetGradTTSModel
-    from .pipelines import GlidePipeline, LatentDiffusionPipeline
+    from .pipelines import LDMTextToImagePipeline
 else:
     from .utils.dummy_transformers_objects import *
-
-
-if is_transformers_available() and is_inflect_available() and is_unidecode_available():
-    from .pipelines import GradTTSPipeline
-else:
-    from .utils.dummy_transformers_and_inflect_and_unidecode_objects import *

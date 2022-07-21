@@ -17,10 +17,6 @@
 # limitations under the License.
 
 from .dualencoder_gfn import DualEncoderEpsNetwork
-from .unet import UNetModel
-from .unet_glide import GlideSuperResUNetModel, GlideTextToImageUNetModel, GlideUNetModel
-from .unet_grad_tts import UNetGradTTSModel
-from .unet_ldm import UNetLDMModel
-from .unet_rl import TemporalUNet
-from .unet_sde_score_estimation import NCSNpp
+from .unet_2d import UNet2DModel
+from .unet_2d_condition import UNet2DConditionModel
 from .vae import AutoencoderKL, VQModel

@@ -2,43 +2,46 @@
 import torch
 
 from diffusers import DiffusionPipeline
+from tqdm.auto import tqdm
 
 
-# TODO(Patrick, Anton, Suraj) - rename `x` to better variable names
 class ScoreSdeVePipeline(DiffusionPipeline):
     def __init__(self, model, scheduler):
         super().__init__()
         self.register_modules(model=model, scheduler=scheduler)
 
-    def __call__(self, num_inference_steps=2000, generator=None):
+    @torch.no_grad()
+    def __call__(self, num_inference_steps=2000, generator=None, output_type="pil"):
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-        img_size = self.model.config.image_size
-        channels = self.model.config.num_channels
-        shape = (1, channels, img_size, img_size)
+        img_size = self.model.config.sample_size
+        shape = (1, 3, img_size, img_size)
 
         model = self.model.to(device)
 
-        # TODO(Patrick) move to scheduler config
-        n_steps = 1
-
-        x = torch.randn(*shape) * self.scheduler.config.sigma_max
-        x = x.to(device)
+        sample = torch.randn(*shape) * self.scheduler.config.sigma_max
+        sample = sample.to(device)
 
         self.scheduler.set_timesteps(num_inference_steps)
         self.scheduler.set_sigmas(num_inference_steps)
 
-        for i, t in enumerate(self.scheduler.timesteps):
+        for i, t in tqdm(enumerate(self.scheduler.timesteps)):
             sigma_t = self.scheduler.sigmas[i] * torch.ones(shape[0], device=device)
 
-            for _ in range(n_steps):
-                with torch.no_grad():
-                    result = self.model(x, sigma_t)
-                x = self.scheduler.step_correct(result, x)
+            # correction step
+            for _ in range(self.scheduler.correct_steps):
+                model_output = self.model(sample, sigma_t)["sample"]
+                sample = self.scheduler.step_correct(model_output, sample)["prev_sample"]
 
-            with torch.no_grad():
-                result = model(x, sigma_t)
+            # prediction step
+            model_output = model(sample, sigma_t)["sample"]
+            output = self.scheduler.step_pred(model_output, t, sample)
 
-            x, x_mean = self.scheduler.step_pred(result, x, t)
+            sample, sample_mean = output["prev_sample"], output["prev_sample_mean"]
 
-        return x_mean
+        sample = sample.clamp(0, 1)
+        sample = sample.cpu().permute(0, 2, 3, 1).numpy()
+        if output_type == "pil":
+            sample = self.numpy_to_pil(sample)
+
+        return {"sample": sample}

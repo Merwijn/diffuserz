@@ -15,6 +15,7 @@
 
 import inspect
 import math
+import pdb
 import tempfile
 import unittest
 
@@ -29,6 +30,7 @@ from diffusers import (
     DDIMScheduler,
     DDPMPipeline,
     DDPMScheduler,
+    DualEncoderEpsNetwork,
     LDMPipeline,
     LDMTextToImagePipeline,
     PNDMPipeline,
@@ -604,6 +606,90 @@ class VQModelTests(ModelTesterMixin, unittest.TestCase):
         expected_output_slice = torch.tensor([-1.1321, 0.1056, 0.3505, -0.6461, -0.2014, 0.0419, -0.5763, -0.8462, -0.4218])
         # fmt: on
         self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-2))
+
+
+class DualEncoderEpsNetworkTests(unittest.TestCase):
+    model_class = DualEncoderEpsNetwork
+
+    @property
+    def dummy_input(self):
+        batch_size = 4
+
+        time_step = torch.tensor([10] * batch_size).to(torch_device)
+
+        class GeoDiffData:
+            num_nodes = 26
+            atom_type = torch.randint(0, 6, (num_nodes,)).to(torch_device)
+            bond_edge_index = torch.randint(0, 20, (2,54,)).to(torch_device)
+            edge_type = torch.randint(0, 20, (238,)).to(torch_device)
+            num_graphs = 1
+            pos = torch.randn(num_nodes, 3).to(torch_device)
+
+        torch.manual_seed(0)
+        noise = GeoDiffData()
+
+        return {"sample": noise, "timestep": time_step}
+
+    @property
+    def input_shape(self):
+        return (4, 16, 14)
+
+    @property
+    def output_shape(self):
+        return (4, 16, 14)
+
+    def prepare_init_args_and_inputs_for_common(self):
+        init_dict ={
+          "hidden_dim": 128,
+          "num_convs": 6,
+          "num_convs_local": 4,
+          "cutoff": 10.0,
+          "mlp_act": "relu",
+          "edge_order": 3,
+          "edge_encoder": "mlp",
+          "smooth_conv": True
+        }
+
+        inputs_dict = self.dummy_input
+        return init_dict, inputs_dict
+
+    def test_from_pretrained_hub(self):
+        model, loading_info = DualEncoderEpsNetwork.from_pretrained(
+            "fusing/gfn-molecule-gen-drugs", output_loading_info=True
+        )
+        import ipdb; pdb.set_trace()
+        print()
+        self.assertIsNotNone(model)
+        import ipdb; pdb.set_trace()
+        self.assertEqual(len(loading_info["missing_keys"]), 0)
+
+        model.to(torch_device)
+        image = model(**self.dummy_input)
+
+        assert image is not None, "Make sure output is not None"
+
+    def test_output_pretrained(self):
+        model = DualEncoderEpsNetwork.from_pretrained("fusing/gfn-molecule-gen-drugs")
+        model.eval()
+
+        torch.manual_seed(0)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(0)
+
+        seq_len = 16
+        input = self.dummy_input
+        sample, time_step = input["sample"], input["timestep"]
+        import ipdb; pdb.set_trace()
+        with torch.no_grad():
+            output = model(sample, time_step)
+        import ipdb; pdb.set_trace()
+
+        output_slice = output[0, -3:, -3:].flatten()
+        # fmt: off
+        expected_output_slice = torch.tensor([-0.2714, 0.1042, -0.0794, -0.2820, 0.0803, -0.0811, -0.2345, 0.0580, -0.0584])
+        # fmt: on
+
+        self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-3))
 
 
 class AutoencoderKLTests(ModelTesterMixin, unittest.TestCase):

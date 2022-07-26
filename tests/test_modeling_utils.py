@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import inspect
 import math
 import tempfile
@@ -22,24 +21,25 @@ import unittest
 import numpy as np
 import torch
 
-from diffusers import UNetConditionalModel  # noqa: F401 TODO(Patrick) - need to write tests with it
+import PIL
+from diffusers import UNet2DConditionModel  # noqa: F401 TODO(Patrick) - need to write tests with it
 from diffusers import (
     AutoencoderKL,
     DDIMPipeline,
     DDIMScheduler,
     DDPMPipeline,
     DDPMScheduler,
-    LatentDiffusionPipeline,
-    LatentDiffusionUncondPipeline,
+    LDMPipeline,
+    LDMTextToImagePipeline,
     PNDMPipeline,
     PNDMScheduler,
     ScoreSdeVePipeline,
     ScoreSdeVeScheduler,
     TemporalUNet,
-    UNetUnconditionalModel,
+    UNet2DModel,
     VQModel,
 )
-from diffusers.configuration_utils import ConfigMixin
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.testing_utils import floats_tensor, slow, torch_device
 from diffusers.training_utils import EMAModel
@@ -48,25 +48,63 @@ from diffusers.training_utils import EMAModel
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
+class SampleObject(ConfigMixin):
+    config_name = "config.json"
+
+    @register_to_config
+    def __init__(
+        self,
+        a=2,
+        b=5,
+        c=(2, 5),
+        d="for diffusion",
+        e=[1, 3],
+    ):
+        pass
+
+
 class ConfigTester(unittest.TestCase):
     def test_load_not_from_mixin(self):
         with self.assertRaises(ValueError):
             ConfigMixin.from_config("dummy_path")
 
+    def test_register_to_config(self):
+        obj = SampleObject()
+        config = obj.config
+        assert config["a"] == 2
+        assert config["b"] == 5
+        assert config["c"] == (2, 5)
+        assert config["d"] == "for diffusion"
+        assert config["e"] == [1, 3]
+
+        # init ignore private arguments
+        obj = SampleObject(_name_or_path="lalala")
+        config = obj.config
+        assert config["a"] == 2
+        assert config["b"] == 5
+        assert config["c"] == (2, 5)
+        assert config["d"] == "for diffusion"
+        assert config["e"] == [1, 3]
+
+        # can override default
+        obj = SampleObject(c=6)
+        config = obj.config
+        assert config["a"] == 2
+        assert config["b"] == 5
+        assert config["c"] == 6
+        assert config["d"] == "for diffusion"
+        assert config["e"] == [1, 3]
+
+        # can use positional arguments.
+        obj = SampleObject(1, c=6)
+        config = obj.config
+        assert config["a"] == 1
+        assert config["b"] == 5
+        assert config["c"] == 6
+        assert config["d"] == "for diffusion"
+        assert config["e"] == [1, 3]
+
     def test_save_load(self):
-        class SampleObject(ConfigMixin):
-            config_name = "config.json"
-
-            def __init__(
-                self,
-                a=2,
-                b=5,
-                c=(2, 5),
-                d="for diffusion",
-                e=[1, 3],
-            ):
-                self.register_to_config(a=a, b=b, c=c, d=d, e=e)
-
         obj = SampleObject()
         config = obj.config
 
@@ -233,7 +271,7 @@ class ModelTesterMixin:
 
 
 class UnetModelTests(ModelTesterMixin, unittest.TestCase):
-    model_class = UNetUnconditionalModel
+    model_class = UNet2DModel
 
     @property
     def dummy_input(self):
@@ -256,14 +294,14 @@ class UnetModelTests(ModelTesterMixin, unittest.TestCase):
 
     def prepare_init_args_and_inputs_for_common(self):
         init_dict = {
-            "block_channels": (32, 64),
-            "down_blocks": ("UNetResDownBlock2D", "UNetResAttnDownBlock2D"),
-            "up_blocks": ("UNetResAttnUpBlock2D", "UNetResUpBlock2D"),
-            "num_head_channels": None,
+            "block_out_channels": (32, 64),
+            "down_block_types": ("DownBlock2D", "AttnDownBlock2D"),
+            "up_block_types": ("AttnUpBlock2D", "UpBlock2D"),
+            "attention_head_dim": None,
             "out_channels": 3,
             "in_channels": 3,
-            "num_res_blocks": 2,
-            "image_size": 32,
+            "layers_per_block": 2,
+            "sample_size": 32,
         }
         inputs_dict = self.dummy_input
         return init_dict, inputs_dict
@@ -271,14 +309,14 @@ class UnetModelTests(ModelTesterMixin, unittest.TestCase):
 
 #    TODO(Patrick) - Re-add this test after having correctly added the final VE checkpoints
 #    def test_output_pretrained(self):
-#        model = UNetUnconditionalModel.from_pretrained("fusing/ddpm_dummy_update", subfolder="unet")
+#        model = UNet2DModel.from_pretrained("fusing/ddpm_dummy_update", subfolder="unet")
 #        model.eval()
 #
 #        torch.manual_seed(0)
 #        if torch.cuda.is_available():
 #            torch.cuda.manual_seed_all(0)
 #
-#        noise = torch.randn(1, model.config.in_channels, model.config.image_size, model.config.image_size)
+#        noise = torch.randn(1, model.config.in_channels, model.config.sample_size, model.config.sample_size)
 #        time_step = torch.tensor([10])
 #
 #        with torch.no_grad():
@@ -292,7 +330,7 @@ class UnetModelTests(ModelTesterMixin, unittest.TestCase):
 
 
 class UNetLDMModelTests(ModelTesterMixin, unittest.TestCase):
-    model_class = UNetUnconditionalModel
+    model_class = UNet2DModel
 
     @property
     def dummy_input(self):
@@ -315,23 +353,21 @@ class UNetLDMModelTests(ModelTesterMixin, unittest.TestCase):
 
     def prepare_init_args_and_inputs_for_common(self):
         init_dict = {
-            "image_size": 32,
+            "sample_size": 32,
             "in_channels": 4,
             "out_channels": 4,
-            "num_res_blocks": 2,
-            "block_channels": (32, 64),
-            "num_head_channels": 32,
-            "conv_resample": True,
-            "down_blocks": ("UNetResDownBlock2D", "UNetResDownBlock2D"),
-            "up_blocks": ("UNetResUpBlock2D", "UNetResUpBlock2D"),
+            "layers_per_block": 2,
+            "block_out_channels": (32, 64),
+            "attention_head_dim": 32,
+            "down_block_types": ("DownBlock2D", "DownBlock2D"),
+            "up_block_types": ("UpBlock2D", "UpBlock2D"),
         }
         inputs_dict = self.dummy_input
         return init_dict, inputs_dict
 
     def test_from_pretrained_hub(self):
-        model, loading_info = UNetUnconditionalModel.from_pretrained(
-            "fusing/unet-ldm-dummy-update", output_loading_info=True
-        )
+        model, loading_info = UNet2DModel.from_pretrained("fusing/unet-ldm-dummy-update", output_loading_info=True)
+
         self.assertIsNotNone(model)
         self.assertEqual(len(loading_info["missing_keys"]), 0)
 
@@ -341,14 +377,14 @@ class UNetLDMModelTests(ModelTesterMixin, unittest.TestCase):
         assert image is not None, "Make sure output is not None"
 
     def test_output_pretrained(self):
-        model = UNetUnconditionalModel.from_pretrained("fusing/unet-ldm-dummy-update")
+        model = UNet2DModel.from_pretrained("fusing/unet-ldm-dummy-update")
         model.eval()
 
         torch.manual_seed(0)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(0)
 
-        noise = torch.randn(1, model.config.in_channels, model.config.image_size, model.config.image_size)
+        noise = torch.randn(1, model.config.in_channels, model.config.sample_size, model.config.sample_size)
         time_step = torch.tensor([10] * noise.shape[0])
 
         with torch.no_grad():
@@ -371,7 +407,7 @@ class UNetLDMModelTests(ModelTesterMixin, unittest.TestCase):
 #        if torch.cuda.is_available():
 #            torch.cuda.manual_seed_all(0)
 #
-#        noise = torch.randn(1, model.config.in_channels, model.config.image_size, model.config.image_size)
+#        noise = torch.randn(1, model.config.in_channels, model.config.sample_size, model.config.sample_size)
 #        context = torch.ones((1, 16, 64), dtype=torch.float32)
 #        time_step = torch.tensor([10] * noise.shape[0])
 #
@@ -388,13 +424,12 @@ class UNetLDMModelTests(ModelTesterMixin, unittest.TestCase):
 
 
 class NCSNppModelTests(ModelTesterMixin, unittest.TestCase):
-    model_class = UNetUnconditionalModel
+    model_class = UNet2DModel
 
     @property
-    def dummy_input(self):
+    def dummy_input(self, sizes=(32, 32)):
         batch_size = 4
         num_channels = 3
-        sizes = (32, 32)
 
         noise = floats_tensor((batch_size, num_channels) + sizes).to(torch_device)
         time_step = torch.tensor(batch_size * [10]).to(torch_device)
@@ -411,44 +446,45 @@ class NCSNppModelTests(ModelTesterMixin, unittest.TestCase):
 
     def prepare_init_args_and_inputs_for_common(self):
         init_dict = {
-            "block_channels": [32, 64, 64, 64],
+            "block_out_channels": [32, 64, 64, 64],
             "in_channels": 3,
-            "num_res_blocks": 1,
+            "layers_per_block": 1,
             "out_channels": 3,
             "time_embedding_type": "fourier",
-            "resnet_eps": 1e-6,
+            "norm_eps": 1e-6,
             "mid_block_scale_factor": math.sqrt(2.0),
-            "resnet_num_groups": None,
-            "down_blocks": [
-                "UNetResSkipDownBlock2D",
-                "UNetResAttnSkipDownBlock2D",
-                "UNetResSkipDownBlock2D",
-                "UNetResSkipDownBlock2D",
+            "norm_num_groups": None,
+            "down_block_types": [
+                "SkipDownBlock2D",
+                "AttnSkipDownBlock2D",
+                "SkipDownBlock2D",
+                "SkipDownBlock2D",
             ],
-            "up_blocks": [
-                "UNetResSkipUpBlock2D",
-                "UNetResSkipUpBlock2D",
-                "UNetResAttnSkipUpBlock2D",
-                "UNetResSkipUpBlock2D",
+            "up_block_types": [
+                "SkipUpBlock2D",
+                "SkipUpBlock2D",
+                "AttnSkipUpBlock2D",
+                "SkipUpBlock2D",
             ],
         }
         inputs_dict = self.dummy_input
         return init_dict, inputs_dict
 
     def test_from_pretrained_hub(self):
-        model, loading_info = UNetUnconditionalModel.from_pretrained(
-            "fusing/ncsnpp-ffhq-ve-dummy-update", output_loading_info=True
-        )
+        model, loading_info = UNet2DModel.from_pretrained("google/ncsnpp-celebahq-256", output_loading_info=True)
         self.assertIsNotNone(model)
         self.assertEqual(len(loading_info["missing_keys"]), 0)
 
         model.to(torch_device)
-        image = model(**self.dummy_input)
+        inputs = self.dummy_input
+        noise = floats_tensor((4, 3) + (256, 256)).to(torch_device)
+        inputs["sample"] = noise
+        image = model(**inputs)
 
         assert image is not None, "Make sure output is not None"
 
     def test_output_pretrained_ve_mid(self):
-        model = UNetUnconditionalModel.from_pretrained("google/ncsnpp-celebahq-256")
+        model = UNet2DModel.from_pretrained("google/ncsnpp-celebahq-256")
         model.to(torch_device)
 
         torch.manual_seed(0)
@@ -473,7 +509,7 @@ class NCSNppModelTests(ModelTesterMixin, unittest.TestCase):
         self.assertTrue(torch.allclose(output_slice, expected_output_slice, rtol=1e-2))
 
     def test_output_pretrained_ve_large(self):
-        model = UNetUnconditionalModel.from_pretrained("fusing/ncsnpp-ffhq-ve-dummy-update")
+        model = UNet2DModel.from_pretrained("fusing/ncsnpp-ffhq-ve-dummy-update")
         model.to(torch_device)
 
         torch.manual_seed(0)
@@ -502,10 +538,9 @@ class VQModelTests(ModelTesterMixin, unittest.TestCase):
     model_class = VQModel
 
     @property
-    def dummy_input(self):
+    def dummy_input(self, sizes=(32, 32)):
         batch_size = 4
         num_channels = 3
-        sizes = (32, 32)
 
         image = floats_tensor((batch_size, num_channels) + sizes).to(torch_device)
 
@@ -532,7 +567,6 @@ class VQModelTests(ModelTesterMixin, unittest.TestCase):
             "embed_dim": 3,
             "sane_index_shape": False,
             "ch_mult": (1,),
-            "dropout": 0.0,
             "double_z": False,
         }
         inputs_dict = self.dummy_input
@@ -718,14 +752,14 @@ class AutoencoderKLTests(ModelTesterMixin, unittest.TestCase):
 class PipelineTesterMixin(unittest.TestCase):
     def test_from_pretrained_save_pretrained(self):
         # 1. Load models
-        model = UNetUnconditionalModel(
-            block_channels=(32, 64),
-            num_res_blocks=2,
-            image_size=32,
+        model = UNet2DModel(
+            block_out_channels=(32, 64),
+            layers_per_block=2,
+            sample_size=32,
             in_channels=3,
             out_channels=3,
-            down_blocks=("UNetResDownBlock2D", "UNetResAttnDownBlock2D"),
-            up_blocks=("UNetResAttnUpBlock2D", "UNetResUpBlock2D"),
+            down_block_types=("DownBlock2D", "AttnDownBlock2D"),
+            up_block_types=("AttnUpBlock2D", "UpBlock2D"),
         )
         schedular = DDPMScheduler(num_train_timesteps=10)
 
@@ -737,11 +771,11 @@ class PipelineTesterMixin(unittest.TestCase):
 
         generator = torch.manual_seed(0)
 
-        image = ddpm(generator=generator)["sample"]
+        image = ddpm(generator=generator, output_type="numpy")["sample"]
         generator = generator.manual_seed(0)
-        new_image = new_ddpm(generator=generator)["sample"]
+        new_image = new_ddpm(generator=generator, output_type="numpy")["sample"]
 
-        assert (image - new_image).abs().sum() < 1e-5, "Models don't give the same forward pass"
+        assert np.abs(image - new_image).sum() < 1e-5, "Models don't give the same forward pass"
 
     @slow
     def test_from_pretrained_hub(self):
@@ -755,161 +789,165 @@ class PipelineTesterMixin(unittest.TestCase):
 
         generator = torch.manual_seed(0)
 
-        image = ddpm(generator=generator)["sample"]
+        image = ddpm(generator=generator, output_type="numpy")["sample"]
         generator = generator.manual_seed(0)
-        new_image = ddpm_from_hub(generator=generator)["sample"]
+        new_image = ddpm_from_hub(generator=generator, output_type="numpy")["sample"]
 
-        assert (image - new_image).abs().sum() < 1e-5, "Models don't give the same forward pass"
+        assert np.abs(image - new_image).sum() < 1e-5, "Models don't give the same forward pass"
+
+    @slow
+    def test_output_format(self):
+        model_path = "google/ddpm-cifar10-32"
+
+        pipe = DDIMPipeline.from_pretrained(model_path)
+
+        generator = torch.manual_seed(0)
+        images = pipe(generator=generator, output_type="numpy")["sample"]
+        assert images.shape == (1, 32, 32, 3)
+        assert isinstance(images, np.ndarray)
+
+        images = pipe(generator=generator, output_type="pil")["sample"]
+        assert isinstance(images, list)
+        assert len(images) == 1
+        assert isinstance(images[0], PIL.Image.Image)
+
+        # use PIL by default
+        images = pipe(generator=generator)["sample"]
+        assert isinstance(images, list)
+        assert isinstance(images[0], PIL.Image.Image)
 
     @slow
     def test_ddpm_cifar10(self):
         model_id = "google/ddpm-cifar10-32"
 
-        unet = UNetUnconditionalModel.from_pretrained(model_id)
+        unet = UNet2DModel.from_pretrained(model_id)
         scheduler = DDPMScheduler.from_config(model_id)
         scheduler = scheduler.set_format("pt")
 
         ddpm = DDPMPipeline(unet=unet, scheduler=scheduler)
 
         generator = torch.manual_seed(0)
-        image = ddpm(generator=generator)["sample"]
+        image = ddpm(generator=generator, output_type="numpy")["sample"]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 32, 32)
-        expected_slice = torch.tensor(
-            [-0.1601, -0.2823, -0.6123, -0.2305, -0.3236, -0.4706, -0.1691, -0.2836, -0.3231]
-        )
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 32, 32, 3)
+        expected_slice = np.array([0.41995, 0.35885, 0.19385, 0.38475, 0.3382, 0.2647, 0.41545, 0.3582, 0.33845])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_ddim_lsun(self):
         model_id = "google/ddpm-ema-bedroom-256"
 
-        unet = UNetUnconditionalModel.from_pretrained(model_id)
+        unet = UNet2DModel.from_pretrained(model_id)
         scheduler = DDIMScheduler.from_config(model_id)
 
         ddpm = DDIMPipeline(unet=unet, scheduler=scheduler)
 
         generator = torch.manual_seed(0)
-        image = ddpm(generator=generator)["sample"]
+        image = ddpm(generator=generator, output_type="numpy")["sample"]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 256, 256)
-        expected_slice = torch.tensor(
-            [-0.9879, -0.9598, -0.9312, -0.9953, -0.9963, -0.9995, -0.9957, -1.0000, -0.9863]
-        )
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 256, 256, 3)
+        expected_slice = np.array([0.00605, 0.0201, 0.0344, 0.00235, 0.00185, 0.00025, 0.00215, 0.0, 0.00685])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_ddim_cifar10(self):
         model_id = "google/ddpm-cifar10-32"
 
-        unet = UNetUnconditionalModel.from_pretrained(model_id)
+        unet = UNet2DModel.from_pretrained(model_id)
         scheduler = DDIMScheduler(tensor_format="pt")
 
         ddim = DDIMPipeline(unet=unet, scheduler=scheduler)
 
         generator = torch.manual_seed(0)
-        image = ddim(generator=generator, eta=0.0)["sample"]
+        image = ddim(generator=generator, eta=0.0, output_type="numpy")["sample"]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 32, 32)
-        expected_slice = torch.tensor(
-            [-0.6553, -0.6765, -0.6799, -0.6749, -0.7006, -0.6974, -0.6991, -0.7116, -0.7094]
-        )
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 32, 32, 3)
+        expected_slice = np.array([0.17235, 0.16175, 0.16005, 0.16255, 0.1497, 0.1513, 0.15045, 0.1442, 0.1453])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_pndm_cifar10(self):
         model_id = "google/ddpm-cifar10-32"
 
-        unet = UNetUnconditionalModel.from_pretrained(model_id)
+        unet = UNet2DModel.from_pretrained(model_id)
         scheduler = PNDMScheduler(tensor_format="pt")
 
         pndm = PNDMPipeline(unet=unet, scheduler=scheduler)
         generator = torch.manual_seed(0)
-        image = pndm(generator=generator)["sample"]
+        image = pndm(generator=generator, output_type="numpy")["sample"]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 32, 32)
-        expected_slice = torch.tensor(
-            [-0.6872, -0.7071, -0.7188, -0.7057, -0.7515, -0.7191, -0.7377, -0.7565, -0.7500]
-        )
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 32, 32, 3)
+        expected_slice = np.array([0.1564, 0.14645, 0.1406, 0.14715, 0.12425, 0.14045, 0.13115, 0.12175, 0.125])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_ldm_text2img(self):
-        ldm = LatentDiffusionPipeline.from_pretrained("CompVis/ldm-text2im-large-256")
+        ldm = LDMTextToImagePipeline.from_pretrained("CompVis/ldm-text2im-large-256")
 
         prompt = "A painting of a squirrel eating a burger"
         generator = torch.manual_seed(0)
-        image = ldm([prompt], generator=generator, num_inference_steps=20)
+        image = ldm([prompt], generator=generator, guidance_scale=6.0, num_inference_steps=20, output_type="numpy")[
+            "sample"
+        ]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 256, 256)
-        expected_slice = torch.tensor([0.7295, 0.7358, 0.7256, 0.7435, 0.7095, 0.6884, 0.7325, 0.6921, 0.6458])
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 256, 256, 3)
+        expected_slice = np.array([0.9256, 0.9340, 0.8933, 0.9361, 0.9113, 0.8727, 0.9122, 0.8745, 0.8099])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_ldm_text2img_fast(self):
-        ldm = LatentDiffusionPipeline.from_pretrained("CompVis/ldm-text2im-large-256")
+        ldm = LDMTextToImagePipeline.from_pretrained("CompVis/ldm-text2im-large-256")
 
         prompt = "A painting of a squirrel eating a burger"
         generator = torch.manual_seed(0)
-        image = ldm([prompt], generator=generator, num_inference_steps=1)
+        image = ldm([prompt], generator=generator, num_inference_steps=1, output_type="numpy")["sample"]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 256, 256)
-        expected_slice = torch.tensor([0.3163, 0.8670, 0.6465, 0.1865, 0.6291, 0.5139, 0.2824, 0.3723, 0.4344])
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 256, 256, 3)
+        expected_slice = np.array([0.3163, 0.8670, 0.6465, 0.1865, 0.6291, 0.5139, 0.2824, 0.3723, 0.4344])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_score_sde_ve_pipeline(self):
-        model = UNetUnconditionalModel.from_pretrained("google/ncsnpp-ffhq-1024")
+        model = UNet2DModel.from_pretrained("google/ncsnpp-church-256")
 
         torch.manual_seed(0)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(0)
 
-        scheduler = ScoreSdeVeScheduler.from_config("google/ncsnpp-ffhq-1024")
+        scheduler = ScoreSdeVeScheduler.from_config("google/ncsnpp-church-256")
 
         sde_ve = ScoreSdeVePipeline(model=model, scheduler=scheduler)
 
         torch.manual_seed(0)
-        image = sde_ve(num_inference_steps=2)
+        image = sde_ve(num_inference_steps=300, output_type="numpy")["sample"]
 
-        if model.device.type == "cpu":
-            # patrick's cpu
-            expected_image_sum = 3384805888.0
-            expected_image_mean = 1076.00085
+        image_slice = image[0, -3:, -3:, -1]
 
-            # m1 mbp
-            # expected_image_sum = 3384805376.0
-            # expected_image_mean = 1076.000610351562
-        else:
-            expected_image_sum = 3382849024.0
-            expected_image_mean = 1075.3788
-
-        assert (image.abs().sum() - expected_image_sum).abs().cpu().item() < 1e-2
-        assert (image.abs().mean() - expected_image_mean).abs().cpu().item() < 1e-4
+        assert image.shape == (1, 256, 256, 3)
+        expected_slice = np.array([0.64363, 0.5868, 0.3031, 0.2284, 0.7409, 0.3216, 0.25643, 0.6557, 0.2633])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     @slow
     def test_ldm_uncond(self):
-        ldm = LatentDiffusionUncondPipeline.from_pretrained("CompVis/ldm-celebahq-256")
+        ldm = LDMPipeline.from_pretrained("CompVis/ldm-celebahq-256")
 
         generator = torch.manual_seed(0)
-        image = ldm(generator=generator, num_inference_steps=5)["sample"]
+        image = ldm(generator=generator, num_inference_steps=5, output_type="numpy")["sample"]
 
-        image_slice = image[0, -1, -3:, -3:].cpu()
+        image_slice = image[0, -3:, -3:, -1]
 
-        assert image.shape == (1, 3, 256, 256)
-        expected_slice = torch.tensor(
-            [-0.1202, -0.1005, -0.0635, -0.0520, -0.1282, -0.0838, -0.0981, -0.1318, -0.1106]
-        )
-        assert (image_slice.flatten() - expected_slice).abs().max() < 1e-2
+        assert image.shape == (1, 256, 256, 3)
+        expected_slice = np.array([0.4399, 0.44975, 0.46825, 0.474, 0.4359, 0.4581, 0.45095, 0.4341, 0.4447])
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2

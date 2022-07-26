@@ -28,7 +28,7 @@ class PNDMPipeline(DiffusionPipeline):
         self.register_modules(unet=unet, scheduler=scheduler)
 
     @torch.no_grad()
-    def __call__(self, batch_size=1, generator=None, torch_device=None, num_inference_steps=50):
+    def __call__(self, batch_size=1, generator=None, torch_device=None, num_inference_steps=50, output_type="pil"):
         # For more information on the sampling method you can take a look at Algorithm 2 of
         # the official paper: https://arxiv.org/pdf/2202.09778.pdf
         if torch_device is None:
@@ -38,23 +38,20 @@ class PNDMPipeline(DiffusionPipeline):
 
         # Sample gaussian noise to begin loop
         image = torch.randn(
-            (batch_size, self.unet.in_channels, self.unet.image_size, self.unet.image_size),
+            (batch_size, self.unet.in_channels, self.unet.sample_size, self.unet.sample_size),
             generator=generator,
         )
         image = image.to(torch_device)
 
-        prk_time_steps = self.scheduler.get_prk_time_steps(num_inference_steps)
-        for t in tqdm(range(len(prk_time_steps))):
-            t_orig = prk_time_steps[t]
-            model_output = self.unet(image, t_orig)["sample"]
+        self.scheduler.set_timesteps(num_inference_steps)
+        for t in tqdm(self.scheduler.timesteps):
+            model_output = self.unet(image, t)["sample"]
 
-            image = self.scheduler.step_prk(model_output, t, image, num_inference_steps)["prev_sample"]
+            image = self.scheduler.step(model_output, t, image)["prev_sample"]
 
-        timesteps = self.scheduler.get_time_steps(num_inference_steps)
-        for t in tqdm(range(len(timesteps))):
-            t_orig = timesteps[t]
-            model_output = self.unet(image, t_orig)["sample"]
-
-            image = self.scheduler.step_plms(model_output, t, image, num_inference_steps)["prev_sample"]
+        image = (image / 2 + 0.5).clamp(0, 1)
+        image = image.cpu().permute(0, 2, 3, 1).numpy()
+        if output_type == "pil":
+            image = self.numpy_to_pil(image)
 
         return {"sample": image}

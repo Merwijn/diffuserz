@@ -20,7 +20,7 @@ from typing import Union
 import numpy as np
 import torch
 
-from ..configuration_utils import ConfigMixin
+from ..configuration_utils import ConfigMixin, register_to_config
 from .scheduling_utils import SchedulerMixin
 
 
@@ -48,6 +48,7 @@ def betas_for_alpha_bar(num_diffusion_timesteps, max_beta=0.999):
 
 
 class DDPMScheduler(SchedulerMixin, ConfigMixin):
+    @register_to_config
     def __init__(
         self,
         num_train_timesteps=1000,
@@ -55,22 +56,10 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         beta_end=0.02,
         beta_schedule="linear",
         trained_betas=None,
-        timestep_values=None,
         variance_type="fixed_small",
         clip_sample=True,
-        tensor_format="np",
+        tensor_format="pt",
     ):
-        super().__init__()
-        self.register_to_config(
-            num_train_timesteps=num_train_timesteps,
-            beta_start=beta_start,
-            beta_end=beta_end,
-            beta_schedule=beta_schedule,
-            trained_betas=trained_betas,
-            timestep_values=timestep_values,
-            variance_type=variance_type,
-            clip_sample=clip_sample,
-        )
 
         if trained_betas is not None:
             self.betas = np.asarray(trained_betas)
@@ -101,7 +90,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         )[::-1].copy()
         self.set_format(tensor_format=self.tensor_format)
 
-    def get_variance(self, t, variance_type=None):
+    def _get_variance(self, t, variance_type=None):
         alpha_prod_t = self.alphas_cumprod[t]
         alpha_prod_t_prev = self.alphas_cumprod[t - 1] if t > 0 else self.one
 
@@ -133,6 +122,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         timestep: int,
         sample: Union[torch.FloatTensor, np.ndarray],
         predict_epsilon=True,
+        generator=None,
     ):
         t = timestep
         # 1. compute alphas, betas
@@ -160,6 +150,14 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
         # 5. Compute predicted previous sample µ_t
         # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
         pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
+
+        # 6. Add noise
+        variance = 0
+        if t > 0:
+            noise = self.randn_like(model_output, generator=generator)
+            variance = (self._get_variance(t) ** 0.5) * noise
+
+        pred_prev_sample = pred_prev_sample + variance
 
         return {"prev_sample": pred_prev_sample}
 

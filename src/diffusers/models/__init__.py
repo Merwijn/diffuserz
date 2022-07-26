@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .unet_conditional import UNetConditionalModel
 from .unet_rl import TemporalUNet
-from .unet_unconditional import UNetUnconditionalModel
+from .unet_2d import UNet2DModel
+from .unet_2d_condition import UNet2DConditionModel
 from .vae import AutoencoderKL, VQModel

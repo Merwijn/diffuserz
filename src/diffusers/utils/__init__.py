@@ -68,6 +68,20 @@ try:
 except importlib_metadata.PackageNotFoundError:
     _modelcards_available = False
 
+_torch_scatter_available = importlib.util.find_spec("torch_scatter") is not None
+try:
+    _torch_scatter_version = importlib_metadata.version("torch_scatter")
+    logger.debug(f"Successfully imported torch_scatter version {_torch_scatter_version}")
+except importlib_metadata.PackageNotFoundError:
+    _torch_scatter_available = False
+
+_torch_scatter_available = importlib.util.find_spec("torch_geometric") is not None
+try:
+    _torch_geometric_version = importlib_metadata.version("torch_geometric")
+    logger.debug(f"Successfully imported torch_geometric version {_torch_geometric_version}")
+except importlib_metadata.PackageNotFoundError:
+    _torch_geometric_available = False
+
 
 def is_transformers_available():
     return _transformers_available
@@ -83,6 +97,16 @@ def is_unidecode_available():
 
 def is_modelcards_available():
     return _modelcards_available
+
+
+def is_torch_scatter_available():
+    return _torch_scatter_available
+
+
+def is_torch_geometric_available():
+    # the model source of the Molecule Generation GNN requires a specific torch geometric version
+    # for more info, see the original repo https://github.com/MinkaiXu/GeoDiff or our colab in readme
+    return _torch_geometric_version == "1.7.2"
 
 
 class RepositoryNotFoundError(HTTPError):
@@ -115,6 +139,11 @@ Unidecode`
 INFLECT_IMPORT_ERROR = """
 {0} requires the inflect library but it was not found in your environment. You can install it with pip: `pip install
 inflect`
+"""
+
+TORCH_GEOMETRIC_IMPORT_ERROR = """
+{0} requires version 1.7.2 of torch_geometric but it was not found in your environment. You can install it with conda:
+`conda install -c rusty1s pytorch-geometric=1.7.2`, given pytorch 1.8
 """
 
 
